@@ -1,0 +1,6 @@
+{
+  "name": "TyreTrack Pro",
+  "description": "Industrial Tire Management System for mining operations, featuring predictive analytics, offline-capable field inspections, and advanced maintenance workflows.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["Real-time data synchronization", "Predictive maintenance", "Full offline support"]
+}

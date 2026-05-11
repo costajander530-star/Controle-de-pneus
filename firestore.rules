@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Role checks (require DB lookup)
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function hasRole(role) {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && userDoc().data.role == role;
+    }
+    
+    function isAdmin() { return hasRole('admin'); }
+    function isPlanner() { return hasRole('planner') || isAdmin(); }
+    function isMechanic() { return hasRole('mechanic') || isAdmin(); }
+    function isInspector() { return hasRole('inspector') || isAdmin(); }
+
+    // --- Validation Helpers ---
+    function isValidTire(data) {
+      return data.dot is string && data.dot.size() <= 128 &&
+             data.brand is string && data.brand.size() <= 128 &&
+             data.initialTreadDepth is number &&
+             data.status in ['inventory', 'in_use', 'retreading', 'scrapped', 'to_be_retreaded'] &&
+             (data.createdAt == null || data.createdAt is timestamp) &&
+             (data.updatedAt == null || data.updatedAt is timestamp);
+    }
+
+    function isValidEquipment(data) {
+      return data.tag is string && data.tag.size() <= 128 &&
+             data.hourMeter is number && data.hourMeter >= 0;
+    }
+
+    function isValidInspection(data) {
+      return data.tireId is string && isValidId(data.tireId) &&
+             data.date is timestamp &&
+             data.treadDepthPoints is list && data.treadDepthPoints.size() <= 64;
+    }
+
+    // --- Collection Rules ---
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isValidId(userId) && request.auth.uid == userId && 
+                    incoming().role in ['inspector', 'mechanic', 'planner', 'admin'];
+      allow update: if isSignedIn() && isValidId(userId) && request.auth.uid == userId && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['name', 'site', 'unitName']);
+    }
+
+    match /tires/{tireId} {
+      allow get: if isSignedIn() && isValidId(tireId);
+      allow list: if isSignedIn();
+      allow create: if isPlanner() && isValidId(tireId) && isValidTire(incoming()) && 
+                    (incoming().createdAt == request.time || incoming().createdAt == null);
+      allow update: if (isPlanner() || isMechanic()) && isValidId(tireId) && isValidTire(incoming()) && 
+                    (incoming().updatedAt == request.time || incoming().updatedAt == null);
+    }
+
+    match /equipment/{equipmentId} {
+      allow get: if isSignedIn() && isValidId(equipmentId);
+      allow list: if isSignedIn();
+      allow create, update: if isPlanner() && isValidId(equipmentId) && isValidEquipment(incoming());
+      allow delete: if isPlanner() && isValidId(equipmentId);
+    }
+
+    match /inspections/{inspectionId} {
+      allow get: if isSignedIn() && isValidId(inspectionId);
+      allow list: if isSignedIn();
+      allow create: if (isInspector() || isMechanic()) && isValidId(inspectionId) && 
+                    isValidInspection(incoming()) && 
+                    incoming().date == request.time &&
+                    incoming().inspectorId == request.auth.uid &&
+                    exists(/databases/$(database)/documents/tires/$(incoming().tireId));
+    }
+
+    match /workOrders/{orderId} {
+      allow get: if isSignedIn() && isValidId(orderId);
+      allow list: if isSignedIn();
+      allow create: if isPlanner() && isValidId(orderId);
+      allow update: if (isMechanic() || isPlanner()) && isValidId(orderId);
+    }
+    
+    // Connection test document
+    match /test/connection {
+      allow get: if true;
+    }
+  }
+}

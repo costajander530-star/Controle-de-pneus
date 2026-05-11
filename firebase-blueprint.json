@@ -1,0 +1,94 @@
+{
+  "entities": {
+    "Tire": {
+      "title": "Tire",
+      "description": "Represents an individual tire asset.",
+      "type": "object",
+      "properties": {
+        "dot": { "type": "string" },
+        "brand": { "type": "string" },
+        "model": { "type": "string" },
+        "size": { "type": "string" },
+        "type": { "type": "string", "enum": ["new", "retreaded", "repaired"] },
+        "acquisitionCost": { "type": "number" },
+        "initialTreadDepth": { "type": "number" },
+        "expectedHours": { "type": "number" },
+        "expectedWearMm": { "type": "number" },
+        "status": { "type": "string", "enum": ["inventory", "in_use", "retreading", "scrapped"] },
+        "currentHours": { "type": "number" },
+        "currentTreadDepth": { "type": "number" },
+        "equipmentId": { "type": "string" },
+        "position": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dot", "brand", "model", "size", "initialTreadDepth", "status"]
+    },
+    "Equipment": {
+      "title": "Equipment",
+      "description": "Represents a mining truck or support vehicle.",
+      "type": "object",
+      "properties": {
+        "tag": { "type": "string" },
+        "model": { "type": "string" },
+        "hourMeter": { "type": "number" },
+        "loadCapacity": { "type": "number" },
+        "operationType": { "type": "string" },
+        "site": { "type": "string" }
+      },
+      "required": ["tag", "model", "hourMeter"]
+    },
+    "Inspection": {
+      "title": "Inspection",
+      "description": "A field inspection record for a tire.",
+      "type": "object",
+      "properties": {
+        "tireId": { "type": "string" },
+        "equipmentId": { "type": "string" },
+        "inspectorId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "treadDepthPoints": { "type": "array", "items": { "type": "number" } },
+        "temperature": { "type": "number" },
+        "pressure": { "type": "number" },
+        "condition": { "type": "string" },
+        "photoUrl": { "type": "string" }
+      },
+      "required": ["tireId", "date", "inspectorId"]
+    },
+    "WorkOrder": {
+      "title": "Work Order",
+      "description": "Maintenance task for tires or equipment.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["mount", "unmount", "rotate", "inspect", "retread"] },
+        "status": { "type": "string", "enum": ["open", "in_progress", "completed", "cancelled"] },
+        "tireId": { "type": "string" },
+        "equipmentId": { "type": "string" },
+        "description": { "type": "string" },
+        "cost": { "type": "number" },
+        "technicianId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "status", "createdAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Application user profile.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["inspector", "mechanic", "planner", "admin"] },
+        "site": { "type": "string" }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "/tires/{tireId}": { "schema": "Tire", "description": "Collection of all tire assets." },
+    "/equipment/{equipmentId}": { "schema": "Equipment", "description": "Collection of trucks." },
+    "/inspections/{inspectionId}": { "schema": "Inspection", "description": "Inspection historical records." },
+    "/workOrders/{orderId}": { "schema": "WorkOrder", "description": "Maintenance orders." },
+    "/users/{userId}": { "schema": "User", "description": "User profiles and roles." }
+  }
+}
