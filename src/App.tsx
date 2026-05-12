@@ -34,7 +34,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, signInWithGoogle, logout } from './services/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, getDoc, setDoc, collection, onSnapshot, query, where, orderBy, deleteDoc, updateDoc, serverTimestamp, getDocFromServer, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, onSnapshot, query, where, orderBy, deleteDoc, updateDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { UserProfile, Tire, Equipment, Inspection, WorkOrder, TireStatus, EquipmentStatus } from './types';
 import { cn } from './lib/utils';
 import { seedInitialData } from './services/seed';
@@ -93,17 +93,6 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
-
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if(error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration.");
-    }
-  }
-}
-testConnection();
 
 const generateGeneralReportPDF = (tires: Tire[], equipment: Equipment[]) => {
   const doc = new jsPDF();

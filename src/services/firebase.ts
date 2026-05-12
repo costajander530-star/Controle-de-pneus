@@ -3,6 +3,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signO
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 
+// Consolidate config from env or JSON
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfigJson.apiKey,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigJson.authDomain,
@@ -21,18 +22,6 @@ export const googleProvider = new GoogleAuthProvider();
 
 export const signInWithGoogle = () => signInWithPopup(auth, googleProvider);
 export const logout = () => signOut(auth);
-
-// Validate connection
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('offline')) {
-      console.error("Please check your Firebase configuration or network.");
-    }
-  }
-}
-testConnection();
 
 export enum OperationType {
   CREATE = 'create',
