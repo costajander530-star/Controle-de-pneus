@@ -355,13 +355,16 @@ const TruckLayout = ({ equipment, tires }: { equipment: Equipment, tires: Tire[]
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [isManualAuth, setIsManualAuth] = useState(false);
+  const [isManualAuth, setIsManualAuth] = useState(() => {
+    return localStorage.getItem('isManualAuth') === 'true';
+  });
   const [loginCreds, setLoginCreds] = useState({ username: '', password: '' });
   const [view, setView] = useState<'dashboard' | 'inventory' | 'equipment' | 'inspections' | 'reports' | 'settings' | 'fleet-status' | 'alerts' | 'mapping'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [tires, setTires] = useState<Tire[]>([]);
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [inspections, setInspections] = useState<Inspection[]>([]);
+  const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
   const [isEditTireModalOpen, setIsEditTireModalOpen] = useState(false);
   const [selectedTireToEdit, setSelectedTireToEdit] = useState<Tire | null>(null);
   const [loading, setLoading] = useState(true);
@@ -683,11 +686,19 @@ export default function App() {
     }
   };
 
+  const handleLogout = async () => {
+    setIsManualAuth(false);
+    localStorage.removeItem('isManualAuth');
+    await logout();
+    setProfile(null);
+  };
+
   const updateUnitName = async () => {
-    if (!user || !profile) return;
+    if ((!user && !isManualAuth) || !profile) return;
     try {
       const updatedProfile = { ...profile, unitName: unitNameInput };
-      await setDoc(doc(db, 'users', user.uid), updatedProfile);
+      const userId = user?.uid || 'manual-admin';
+      await setDoc(doc(db, 'users', userId), updatedProfile);
       setProfile(updatedProfile);
       alert("Unidade atualizada com sucesso!");
     } catch (error) {
@@ -719,6 +730,28 @@ export default function App() {
           setProfile(newProfile);
           setUnitNameInput(newProfile.unitName || 'Mina Itabira - Setor Norte');
         }
+        setIsManualAuth(false);
+        localStorage.removeItem('isManualAuth');
+      } else if (isManualAuth) {
+        // Handle manual auth profile fetch
+        setLoading(true);
+        const docRef = doc(db, 'users', 'manual-admin');
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const p = docSnap.data() as UserProfile;
+          setProfile(p);
+          setUnitNameInput(p.unitName || 'Unidade Central MPC');
+        } else {
+          const manualProfile: UserProfile = {
+            uid: 'manual-admin',
+            name: 'MPC Pneus Admin',
+            email: 'admin@mpcpneus.com.br',
+            role: 'admin',
+            unitName: 'Unidade Central MPC'
+          };
+          setProfile(manualProfile);
+          setUnitNameInput(manualProfile.unitName);
+        }
       } else {
         setProfile(null);
       }
@@ -738,7 +771,10 @@ export default function App() {
     const unsubInsp = onSnapshot(collection(db, 'inspections'), (snap) => {
       setInspections(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Inspection)));
     });
-    return () => { unsubTires(); unsubEq(); unsubInsp(); };
+    const unsubWork = onSnapshot(collection(db, 'workOrders'), (snap) => {
+      setWorkOrders(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as WorkOrder)));
+    });
+    return () => { unsubTires(); unsubEq(); unsubInsp(); unsubWork(); };
   }, [user, isManualAuth]);
 
   if (loading) return (
@@ -801,14 +837,12 @@ export default function App() {
           onClick={() => {
             if (loginCreds.username === 'MPCpneus' && loginCreds.password === '@Mpc2026') {
               setIsManualAuth(true);
-              // Set a mock user for data access if needed (or we'll use conditional logic)
-              setProfile({
-                uid: 'manual-admin',
-                name: 'MPC Pneus Admin',
-                email: 'admin@mpcpneus.com.br',
-                role: 'admin',
-                unitName: 'Unidade Central MPC'
-              });
+              localStorage.setItem('isManualAuth', 'true');
+              // Trigger a re-run of the auth effect to load manual profile
+              setLoading(true);
+              setTimeout(() => {
+                setLoading(false);
+              }, 100);
             } else {
               alert("Credenciais inválidas!");
             }
@@ -886,7 +920,7 @@ export default function App() {
             <div className="w-2 h-2 bg-brand-secondary rounded-full" />
           </div>
           <button 
-            onClick={logout}
+            onClick={handleLogout}
             className="p-3 text-red-400 hover:bg-red-900/20 rounded transition-all"
             title="LOGOUT"
           >
@@ -2401,7 +2435,7 @@ export default function App() {
                   </div>
                 </div>
                 <button 
-                  onClick={logout}
+                  onClick={handleLogout}
                   className="w-full flex items-center justify-center gap-3 px-6 py-4 text-red-400 bg-red-900/10 border border-red-500/20 rounded font-bold text-xs uppercase tracking-widest transition-all hover:bg-red-900/20"
                 >
                   <LogOut className="w-4 h-4" />
