@@ -64,6 +64,7 @@ service cloud.firestore {
                     (incoming().createdAt == request.time || incoming().createdAt == null);
       allow update: if (isPlanner() || isMechanic()) && isValidId(tireId) && isValidTire(incoming()) && 
                     (incoming().updatedAt == request.time || incoming().updatedAt == null);
+      allow delete: if isPlanner();
     }
 
     match /equipment/{equipmentId} {

@@ -671,6 +671,18 @@ export default function App() {
     }
   };
 
+  const handleDeleteTire = async (id: string, dot: string) => {
+    if (!window.confirm(`Deseja realmente excluir o pneu ${dot}? Esta ação é irreversível e removerá todo o histórico associado.`)) return;
+    try {
+      await deleteDoc(doc(db, 'tires', id));
+      alert("Pneu excluído com sucesso.");
+    } catch (error) {
+      console.error("Erro ao excluir pneu:", error);
+      alert("Erro ao excluir pneu. Verifique suas permissões.");
+      handleFirestoreError(error, OperationType.DELETE, `tires/${id}`);
+    }
+  };
+
   const updateUnitName = async () => {
     if (!user || !profile) return;
     try {
@@ -1810,113 +1822,148 @@ export default function App() {
                 exit={{ opacity: 0, x: 10 }}
                 className="space-y-8"
               >
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-border-subtle">
                   <div>
-                    <h2 className="text-3xl font-bold tracking-tight mb-1">Controle de Ativos</h2>
-                    <p className="text-gray-500 text-sm font-mono uppercase tracking-widest">Gestão Total de Inventário</p>
+                    <h2 className="text-3xl font-bold tracking-tight mb-1 flex items-center gap-3">
+                      <Database className="w-8 h-8 text-brand-primary" />
+                      Controle de Ativos
+                    </h2>
+                    <p className="text-gray-500 text-sm font-mono uppercase tracking-widest px-11">Gestão de Inventário por Lotes</p>
                   </div>
                   <button 
                     onClick={() => setIsRegisterTireModalOpen(true)}
-                    className="bg-brand-secondary text-white px-8 py-3 rounded font-black text-xs hover:brightness-110 transition-all uppercase tracking-widest shadow-[0_0_15px_rgba(34,197,94,0.2)]"
+                    className="bg-brand-secondary text-white px-8 py-3 rounded font-black text-xs hover:brightness-110 transition-all uppercase tracking-widest shadow-[0_0_15px_rgba(34,197,94,0.2)] flex items-center gap-2"
                   >
-                    Cadastrar Lote (Batch)
+                    <Plus className="w-4 h-4" />
+                    Cadastrar Novo Lote
                   </button>
                 </div>
 
-                <div className="space-y-12">
-                  {/* Grouped by Date and Brand */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   {(() => {
+                    // Grouping by Batch Name first, then Date if key is missing
                     const batchesMap = tires.reduce((acc, tire) => {
-                      const key = tire.arrivalDate || 'Sem Data';
+                      const key = tire.batchName || tire.arrivalDate || 'Sem Identificação';
                       if (!acc[key]) acc[key] = [];
                       acc[key].push(tire);
                       return acc;
                     }, {} as Record<string, Tire[]>);
 
-                    return Object.entries(batchesMap).sort((a, b) => b[0].localeCompare(a[0])).map(([date, batchTires]) => {
+                    return Object.entries(batchesMap).sort((a,b) => b[0].localeCompare(a[0])).map(([batchKey, batchTires]) => {
                       const tiresList = batchTires as Tire[];
+                      const avgWear = tiresList.reduce((sum, t) => sum + (t.currentTreadDepth / t.initialTreadDepth), 0) / tiresList.length;
+                      const date = tiresList[0]?.arrivalDate || '---';
+
                       return (
-                      <div key={date} className="space-y-4">
-                        <div className="flex items-center gap-4">
-                          <span className="bg-bg-card border border-border-subtle px-4 py-1 rounded font-mono text-xs font-bold text-brand-primary">{date}</span>
-                          <div className="h-px flex-1 bg-border-subtle opacity-30" />
-                          <span className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">{tiresList.length} Unidades no Período</span>
-                        </div>
-                        
-                        <div className="bg-bg-section rounded-lg border border-border-subtle overflow-hidden shadow-sm">
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left border-collapse min-w-[800px]">
+                        <motion.div 
+                          key={batchKey} 
+                          layout
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="bg-bg-section rounded-xl border border-border-subtle overflow-hidden flex flex-col shadow-lg"
+                        >
+                          <div className="p-6 bg-bg-deep/50 border-b border-border-subtle flex items-center justify-between">
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 rounded bg-brand-primary/10 flex items-center justify-center border border-brand-primary/20 text-brand-primary">
+                                <Package className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <h3 className="text-sm font-black uppercase tracking-tight text-white">{batchKey}</h3>
+                                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Recebido em: {date}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Estado Médio</p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <div className="w-24 h-1.5 bg-bg-deep rounded-full overflow-hidden border border-border-subtle">
+                                  <div 
+                                    className={cn(
+                                      "h-full transition-all duration-1000",
+                                      avgWear > 0.7 ? "bg-brand-secondary" : avgWear > 0.4 ? "bg-amber-500" : "bg-red-500"
+                                    )} 
+                                    style={{ width: `${avgWear * 100}%` }} 
+                                  />
+                                </div>
+                                <span className="text-[10px] font-mono font-bold text-brand-primary">{Math.round(avgWear * 100)}%</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex-1 overflow-x-auto">
+                            <table className="w-full text-left border-collapse min-w-[500px]">
                               <thead>
-                                <tr className="bg-bg-deep border-b border-border-subtle">
-                                  <th className="px-8 py-6 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Identificador / Lote</th>
-                                  <th className="px-8 py-6 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Marca & Modelo</th>
-                                  <th className="px-8 py-6 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Status / Aplicação</th>
-                                  <th className="px-8 py-6 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Sulco Atual</th>
-                                  <th className="px-8 py-6 text-[10px] font-bold text-gray-500 uppercase tracking-widest text-right">Alocação / Local</th>
+                                <tr className="bg-bg-deep/30 text-[9px] font-bold text-gray-500 uppercase tracking-widest border-b border-border-subtle">
+                                  <th className="px-6 py-4">DOT / Ident</th>
+                                  <th className="px-6 py-4">Marca/Status</th>
+                                  <th className="px-6 py-4">Sulco</th>
+                                  <th className="px-6 py-4 text-right">Ações</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-border-subtle text-white">
                                 {tiresList.map(t => (
                                   <tr 
                                     key={t.id} 
-                                    className="hover:bg-bg-card/40 transition-all cursor-pointer group relative"
+                                    className="hover:bg-brand-primary/5 transition-all cursor-pointer group"
                                     onClick={() => {
                                       setSelectedTireToEdit(t);
                                       setIsEditTireModalOpen(true);
                                     }}
                                   >
-                                    <td className="px-8 py-7 font-mono font-bold text-brand-primary">
-                                      <div className="flex items-center gap-2">
-                                        {t.batchName || t.dot}
-                                        <Settings className="w-3 h-3 text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                    <td className="px-6 py-4">
+                                      <div className="flex flex-col">
+                                        <span className="font-mono font-bold text-brand-primary text-xs">{t.dot}</span>
+                                        <span className="text-[9px] text-gray-400 font-bold uppercase">{t.type === 'new' ? 'Novo' : 'Reformado'}</span>
                                       </div>
                                     </td>
-                                    <td className="px-8 py-7">
-                                      <p className="font-bold tracking-tight uppercase">{t.brand}</p>
-                                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">{t.model} • {t.size} • {t.type === 'new' ? 'NOVO' : 'REFORMADO'}</p>
-                                    </td>
-                                    <td className="px-8 py-7">
+                                    <td className="px-6 py-4">
+                                      <p className="text-[10px] font-bold text-white uppercase">{t.brand}</p>
                                       <span className={cn(
-                                        "text-[10px] font-black uppercase px-3 py-1 rounded border tracking-tighter",
+                                        "text-[8px] font-black uppercase px-1.5 py-0.5 rounded border tracking-tighter mt-1 inline-block",
                                         t.status === 'in_use' ? "bg-amber-900/20 text-amber-500 border-amber-500/30" :
                                         t.status === 'inventory' ? "bg-brand-secondary/20 text-brand-secondary border-brand-secondary/30" :
                                         t.status === 'scrapped' ? "bg-red-900/20 text-red-500 border-red-500/30" :
                                         "bg-blue-900/20 text-blue-400 border-blue-400/30"
                                       )}>
-                                        {t.status === 'in_use' ? "EM USO" :
-                                        t.status === 'inventory' ? "ESTOQUE" :
-                                        t.status === 'scrapped' ? "SUCATA" :
-                                        t.status === 'to_be_retreaded' ? "P/ REFORMA" :
-                                        t.status.replace('_', ' ').toUpperCase()}
+                                        {t.status === 'in_use' ? "EM USO" : t.status === 'inventory' ? "ESTOQUE" : t.status.replace('_', ' ').toUpperCase()}
                                       </span>
                                     </td>
-                                    <td className="px-8 py-7 text-xs font-mono font-bold">
+                                    <td className="px-6 py-4">
                                       <div className="flex items-center gap-2">
-                                        <div className="w-16 h-1 bg-bg-deep rounded-full overflow-hidden">
+                                        <div className="w-10 h-1 bg-bg-deep rounded-full overflow-hidden border border-border-subtle">
                                            <div className="h-full bg-brand-primary" style={{ width: `${(t.currentTreadDepth / t.initialTreadDepth) * 100}%` }} />
                                         </div>
-                                        {t.currentTreadDepth}mm
+                                        <span className="text-[10px] font-mono text-white">{t.currentTreadDepth}mm</span>
                                       </div>
                                     </td>
-                                    <td className="px-8 py-7 text-[10px] font-bold text-gray-500 uppercase tracking-widest text-right">
-                                       {t.equipmentId ? (
-                                         <div className="flex flex-col">
-                                           <span className="text-brand-primary">TAG: {equipment.find(e => e.id === t.equipmentId)?.tag}</span>
-                                           <span className="opacity-60">POS: {t.position}</span>
-                                         </div>
-                                       ) : 'Estoque Central'}
+                                    <td className="px-6 py-4 text-right">
+                                      <div className="flex items-center justify-end gap-1">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteTire(t.id, t.dot);
+                                          }}
+                                          className="p-1.5 text-gray-500 hover:text-red-500 hover:bg-red-500/10 rounded transition-all"
+                                          title="Excluir"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
                                     </td>
                                   </tr>
                                 ))}
                               </tbody>
                             </table>
                           </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                })()}
-              </div>
+                          
+                          <div className="p-4 bg-bg-deep/20 flex justify-between items-center text-[10px] font-bold text-gray-500 uppercase tracking-widest border-t border-border-subtle">
+                             <span>Total: {tiresList.length}</span>
+                             <span className="text-brand-primary">Disponível: {tiresList.filter(t => t.status === 'inventory').length}</span>
+                          </div>
+                        </motion.div>
+                      );
+                    });
+                  })()}
+                </div>
               </motion.div>
             )}
 
