@@ -33,10 +33,9 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { auth, db, signInWithGoogle, logout } from './services/firebase';
-import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { auth, db, signInWithGoogle, logout, handleFirestoreError, OperationType } from './services/firebase';
+import { onAuthStateChanged, User as FirebaseUser, signInAnonymously } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, onSnapshot, query, where, orderBy, deleteDoc, updateDoc, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
-import { signInAnonymously } from 'firebase/auth';
 import { UserProfile, Tire, Equipment, Inspection, WorkOrder, TireStatus, EquipmentStatus } from './types';
 import { cn } from './lib/utils';
 import { seedInitialData } from './services/seed';
@@ -58,43 +57,6 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
 // --- Helper Functions ---
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
 
 const generateGeneralReportPDF = (tires: Tire[], equipment: Equipment[]) => {
   const doc = new jsPDF();
@@ -784,6 +746,10 @@ export default function App() {
 
     for (const inspection of pendingInspections) {
       try {
+        if (!auth.currentUser) {
+          console.warn("Sync deferred: No authenticated user.");
+          break;
+        }
         // Conflict Resolution Strategy: 
         // 1. Check if inspection already exists (by ID)
         const docRef = doc(db, 'inspections', inspection.id);
@@ -822,10 +788,9 @@ export default function App() {
         successfullySynced.push(inspection.id);
       } catch (error) {
         console.error(`Failed to sync inspection ${inspection.id}:`, error);
-        // If it's a permission error, we might want to remove it to avoid infinite loops
-        if (error instanceof Error && error.message.includes('permission')) {
-          successfullySynced.push(inspection.id); 
-        }
+        // Only discard if it's a structural error (not permission or network)
+        // or if it already exists (which is handled by !docSnap.exists() above)
+        // For now, let's keep them in the list if it's a temporary issue
       }
     }
 
@@ -838,84 +803,83 @@ export default function App() {
     if (!authChecked) return;
 
     const loadData = async () => {
+      // Determine UID: prefer real user, then manual-admin, then fallback to null
+      let uid: string | null = null;
+      if (user) {
+        uid = user.uid;
+      } else if (isManualAuth) {
+        uid = 'manual-admin';
+      }
+
+      if (!uid) {
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       try {
-        if (user) {
-          const docRef = doc(db, 'users', user.uid);
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) {
-            const p = docSnap.data() as UserProfile;
-            setProfile(p);
-            setUnitNameInput(p.unitName || 'Mina Itabira - Setor Norte');
-            setDefaultTireModelInput(p.defaultTireModel || '2400R35');
-            setDefaultTireSizeInput(p.defaultTireSize || '35"');
-          } else {
-            const newProfile: UserProfile = {
-              uid: user.uid,
-              email: user.email || '',
-              name: user.displayName || 'User',
-              role: 'admin',
-              unitName: 'Mina Itabira - Setor Norte',
-              defaultTireModel: '2400R35',
-              defaultTireSize: '35"'
-            };
-            await setDoc(docRef, newProfile);
-            setProfile(newProfile);
-            setUnitNameInput(newProfile.unitName);
-            setDefaultTireModelInput(newProfile.defaultTireModel || '2400R35');
-            setDefaultTireSizeInput(newProfile.defaultTireSize || '35"');
-          }
-        } else if (isManualAuth) {
-          const docRef = doc(db, 'users', 'manual-admin');
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) {
-            const p = docSnap.data() as UserProfile;
-            setProfile(p);
-            setUnitNameInput(p.unitName || 'Unidade Central MPC');
-            setDefaultTireModelInput(p.defaultTireModel || '2400R35');
-            setDefaultTireSizeInput(p.defaultTireSize || '35"');
-          } else {
-            const manualProfile: UserProfile = {
-              uid: 'manual-admin',
-              name: 'MPC Pneus Admin',
-              email: 'admin@mpcpneus.com.br',
-              role: 'admin',
-              unitName: 'Unidade Central MPC',
-              defaultTireModel: '2400R35',
-              defaultTireSize: '35"'
-            };
-            if (isOnline) {
-               await setDoc(docRef, manualProfile);
+        const docRef = doc(db, 'users', uid);
+        const docSnap = await getDoc(docRef);
+
+        if (docSnap.exists()) {
+          const profileData = docSnap.data() as UserProfile;
+          setProfile(profileData);
+          setUnitNameInput(profileData.unitName || '');
+          setDefaultTireModelInput(profileData.defaultTireModel || '2400R35');
+          setDefaultTireSizeInput(profileData.defaultTireSize || '35"');
+        } else if (isManualAuth && uid === 'manual-admin') {
+          // Setup default terminal profile if it doesn't exist
+          const manualProfile: UserProfile = {
+            uid: 'manual-admin',
+            name: 'MPC Pneus Admin',
+            email: 'admin@mpcpneus.com.br',
+            role: 'admin',
+            unitName: 'Unidade Central MPC',
+            defaultTireModel: '2400R35',
+            defaultTireSize: '35"'
+          };
+          
+          if (isOnline && user) {
+            try {
+              await setDoc(docRef, manualProfile);
+            } catch (e) {
+               console.warn("Could not save initial profile to cloud (Permission Denied)");
             }
-            setProfile(manualProfile);
-            setUnitNameInput(manualProfile.unitName);
-            setDefaultTireModelInput(manualProfile.defaultTireModel || '2400R35');
-            setDefaultTireSizeInput(manualProfile.defaultTireSize || '35"');
           }
-        } else {
-          setProfile(null);
+          setProfile(manualProfile);
+          setUnitNameInput(manualProfile.unitName);
+          setDefaultTireModelInput(manualProfile.defaultTireModel);
+          setDefaultTireSizeInput(manualProfile.defaultTireSize);
+        } else if (user) {
+          // Create profile for new Google user
+          const newProfile: UserProfile = {
+            uid: user.uid,
+            email: user.email || '',
+            name: user.displayName || 'Usuário',
+            role: 'admin',
+            unitName: 'Mina Itabira - Setor Norte',
+            defaultTireModel: '2400R35',
+            defaultTireSize: '35"'
+          };
+          if (isOnline) {
+            await setDoc(docRef, newProfile);
+          }
+          setProfile(newProfile);
+          setUnitNameInput(newProfile.unitName);
+          setDefaultTireModelInput(newProfile.defaultTireModel || '2400R35');
+          setDefaultTireSizeInput(newProfile.defaultTireSize || '35"');
         }
       } catch (error) {
-        // Handle "offline" error gracefully without showing a console.error
+        // Handle "offline" error or Permission Denied gracefully
         const isOfflineError = error instanceof Error && error.message.includes('offline');
+        const isPermissionError = error instanceof Error && error.message.includes('permission');
         
-        if (isOfflineError) {
-          console.warn("Cliente offline ao carregar perfil, usando dados locais/temporários.");
-          if (user) {
-            setProfile({
-              uid: user.uid,
-              email: user.email || '',
-              name: user.displayName || 'Usuário (Offline)',
-              role: 'admin',
-              unitName: 'Carregando (Offline)...',
-              defaultTireModel: '2400R35',
-              defaultTireSize: '35"'
-            });
-          } else if (isManualAuth) {
+        if (isOfflineError || isPermissionError) {
+          console.warn(`Acesso local ${isPermissionError ? '(Permissão Pendente)' : '(Offline)'}`);
+          if (uid === 'manual-admin') {
             setProfile({
               uid: 'manual-admin',
-              name: 'MPC Pneus Admin (Offline)',
-              email: 'admin@mpcpneus.com.br',
+              name: 'Terminal MPC (Local)',
               role: 'admin',
               unitName: 'Unidade Central MPC',
               defaultTireModel: '2400R35',
@@ -1036,7 +1000,8 @@ export default function App() {
                 setIsManualAuth(true);
               } catch (error) {
                 console.error("Erro ao autenticar terminal:", error);
-                alert("Falha técnica no acesso. Verifique sua conexão.");
+                const msg = error instanceof Error ? error.message : String(error);
+                alert(`Falha técnica no acesso: ${msg}.\n\nSe o erro persistir, utilize o Login com Google (Suporte).`);
               } finally {
                 setIsLoggingIn(false);
               }
