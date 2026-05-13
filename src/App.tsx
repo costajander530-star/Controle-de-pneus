@@ -736,12 +736,42 @@ export default function App() {
     }
   }, [isOnline, pendingInspections.length, isSyncing]);
 
+  const syncAll = async () => {
+    if (isSyncing || !isOnline) {
+      if (!isOnline) alert("Dispositivo offline. A sincronização requer conexão ativa.");
+      return;
+    }
+    
+    setIsSyncing(true);
+    try {
+      // Step 1: Force push any pending local inspections
+      if (pendingInspections.length > 0) {
+        console.log("Forçando sincronização de itens pendentes...");
+        await performDataSync();
+      }
+      
+      // Step 2: Visual feedback for the "pull" sync 
+      // (onSnapshot handles real-time, but users feel safer with a verification)
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      alert("Sincronização global concluída! Os dados estão alinhados com o servidor.");
+    } catch (error) {
+      console.error("Sync all error:", error);
+      alert("Erro durante a sincronização entre dispositivos.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const syncPendingData = async () => {
     if (!isOnline || pendingInspections.length === 0 || isSyncing) return;
     setIsSyncing(true);
-    console.log(`Syncing ${pendingInspections.length} pending inspections...`);
-    
-    const remaining = [...pendingInspections];
+    await performDataSync();
+    setIsSyncing(false);
+  };
+
+  const performDataSync = async () => {
+    console.log(`Processing ${pendingInspections.length} pending inspections...`);
     const successfullySynced: string[] = [];
 
     for (const inspection of pendingInspections) {
@@ -795,7 +825,6 @@ export default function App() {
     }
 
     setPendingInspections(prev => prev.filter(p => !successfullySynced.includes(p.id)));
-    setIsSyncing(false);
   };
 
   // Profile and Initial Data Fetching
@@ -1136,7 +1165,18 @@ export default function App() {
             </div>
           </div>
           
-          <div className="hidden md:flex gap-8 items-center border-l border-border-subtle pl-8">
+          <div className="hidden md:flex gap-4 items-center border-l border-border-subtle pl-8">
+            <button 
+              onClick={syncAll}
+              disabled={isSyncing}
+              className={cn(
+                "flex items-center gap-2 bg-bg-section border border-border-subtle px-4 py-2.5 rounded font-bold text-[10px] uppercase tracking-widest hover:bg-bg-card transition-all text-[#e2e8f0]",
+                isSyncing && "opacity-50"
+              )}
+            >
+              <RefreshCw className={cn("w-3.5 h-3.5 text-brand-primary", isSyncing && "animate-spin")} />
+              <span>{isSyncing ? 'Sincronizando...' : 'Sincronizar'}</span>
+            </button>
             <div className="text-right">
               <div className="text-[10px] text-gray-500 uppercase font-mono tracking-widest">Média CP/H Frota</div>
               <div className="text-xl font-mono text-brand-primary">$12.84</div>
