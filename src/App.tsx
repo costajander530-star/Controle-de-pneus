@@ -319,6 +319,7 @@ const TruckLayout = ({ equipment, tires }: { equipment: Equipment, tires: Tire[]
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [isManualAuth, setIsManualAuth] = useState(() => {
     return localStorage.getItem('isManualAuth') === 'true';
   });
@@ -713,17 +714,67 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Profile and Initial Data Fetching
+  // Profile Real-time Sync
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
+    if (!authChecked) return;
+    
+    let uid: string | null = null;
+    if (isManualAuth) {
+      uid = 'manual-admin';
+    } else if (user) {
+      uid = user.uid;
+    }
+
+    if (!uid) {
+      setProfile(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    const docRef = doc(db, 'users', uid);
+    
+    // Using onSnapshot to keep configuration synced across devices
+    const unsubProfile = onSnapshot(docRef, async (snap) => {
+      if (snap.exists()) {
+        const profileData = snap.data() as UserProfile;
+        setProfile(profileData);
+        setUnitNameInput(profileData.unitName || '');
+        setDefaultTireModelInput(profileData.defaultTireModel || '2400R35');
+        setDefaultTireSizeInput(profileData.defaultTireSize || '35"');
+        setLoading(false);
+      } else {
+        // Initialize default profile if it doesn't exist
+        const defaultProfile: UserProfile = {
+          uid: uid,
+          name: isManualAuth ? 'Terminal MPC' : (user?.displayName || 'Usuário'),
+          email: isManualAuth ? 'admin@mpcpneus.com.br' : (user?.email || ''),
+          role: 'admin',
+          unitName: isManualAuth ? 'Unidade Central MPC' : 'Mina Itabira - Setor Norte',
+          defaultTireModel: '2400R35',
+          defaultTireSize: '35"'
+        };
+        
+        if (isOnline && (user || auth.currentUser)) {
+          try {
+            await setDoc(docRef, defaultProfile);
+          } catch (e) {
+            console.warn("Could not save initial profile to cloud");
+          }
+        }
+        setProfile(defaultProfile);
+        setLoading(false);
+      }
+    }, (err) => {
+      console.error("Profile sync error:", err);
+      if (err.code === 'permission-denied') {
+        setSyncError("Acesso restrito ao perfil. Verifique seu login.");
+      }
+      setLoading(false);
+    });
+
+    return unsubProfile;
+  }, [user, isManualAuth, authChecked]);
 
   useEffect(() => {
     localStorage.setItem('pendingInspections', JSON.stringify(pendingInspections));
@@ -731,66 +782,41 @@ export default function App() {
 
   // Automatic Sync System
   useEffect(() => {
-    if (isOnline && pendingInspections.length > 0 && !isSyncing) {
+    if (isOnline && pendingInspections.length > 0 && !isSyncing && profile) {
       syncPendingData();
     }
-  }, [isOnline, pendingInspections.length, isSyncing]);
+  }, [isOnline, pendingInspections.length, isSyncing, profile]);
 
   const syncPendingData = async () => {
     if (!isOnline || pendingInspections.length === 0 || isSyncing) return;
     setIsSyncing(true);
     console.log(`Syncing ${pendingInspections.length} pending inspections...`);
     
-    const remaining = [...pendingInspections];
     const successfullySynced: string[] = [];
 
     for (const inspection of pendingInspections) {
       try {
-        if (!auth.currentUser) {
-          console.warn("Sync deferred: No authenticated user.");
-          break;
-        }
-        // Conflict Resolution Strategy: 
-        // 1. Check if inspection already exists (by ID)
+        if (!auth.currentUser) break;
+        
         const docRef = doc(db, 'inspections', inspection.id);
         const docSnap = await getDoc(docRef);
         
         if (!docSnap.exists()) {
-          // 2. Perform Atomic Write for Inspection + Tire Update
           const batch = writeBatch(db);
+          batch.set(docRef, { ...inspection, date: serverTimestamp(), syncDate: serverTimestamp() });
           
-          // Add inspection
-          batch.set(docRef, {
-            ...inspection,
-            date: serverTimestamp(), // Use server time for the cloud record
-            syncDate: serverTimestamp()
-          });
-
-          // Update tire (Last Write Wins for most attributes, but we check if tire was decommissioned)
           const tireRef = doc(db, 'tires', inspection.tireId);
-          const tireSnap = await getDoc(tireRef);
-          
-          if (tireSnap.exists()) {
-            const tireData = tireSnap.data();
-            // If the tire was scrapped while we were offline, we might want to skip the update
-            if (tireData.status !== 'scrapped') {
-              batch.update(tireRef, {
-                currentTreadDepth: inspection.treadDepthPoints[0],
-                pressure: inspection.pressure,
-                updatedAt: serverTimestamp()
-              });
-            }
-          }
+          batch.update(tireRef, {
+            currentTreadDepth: inspection.treadDepthPoints[0],
+            pressure: inspection.pressure,
+            updatedAt: serverTimestamp()
+          });
           
           await batch.commit();
         }
-        
         successfullySynced.push(inspection.id);
       } catch (error) {
         console.error(`Failed to sync inspection ${inspection.id}:`, error);
-        // Only discard if it's a structural error (not permission or network)
-        // or if it already exists (which is handled by !docSnap.exists() above)
-        // For now, let's keep them in the list if it's a temporary issue
       }
     }
 
@@ -798,134 +824,39 @@ export default function App() {
     setIsSyncing(false);
   };
 
-  // Profile and Initial Data Fetching
-  useEffect(() => {
-    if (!authChecked) return;
-
-    const loadData = async () => {
-      // Determine UID: prefer manual-admin if isManualAuth, otherwise real user UID
-      let uid: string | null = null;
-      if (isManualAuth) {
-        uid = 'manual-admin';
-      } else if (user) {
-        uid = user.uid;
-      }
-
-      if (!uid) {
-        setLoading(false);
-        return;
-      }
-
-      setLoading(true);
-      try {
-        const docRef = doc(db, 'users', uid);
-        const docSnap = await getDoc(docRef);
-
-        if (docSnap.exists()) {
-          const profileData = docSnap.data() as UserProfile;
-          setProfile(profileData);
-          setUnitNameInput(profileData.unitName || '');
-          setDefaultTireModelInput(profileData.defaultTireModel || '2400R35');
-          setDefaultTireSizeInput(profileData.defaultTireSize || '35"');
-        } else if (isManualAuth && uid === 'manual-admin') {
-          // Setup default terminal profile if it doesn't exist
-          const manualProfile: UserProfile = {
-            uid: 'manual-admin',
-            name: 'MPC Pneus Admin',
-            email: 'admin@mpcpneus.com.br',
-            role: 'admin',
-            unitName: 'Unidade Central MPC',
-            defaultTireModel: '2400R35',
-            defaultTireSize: '35"'
-          };
-          
-          if (isOnline && user) {
-            try {
-              await setDoc(docRef, manualProfile);
-            } catch (e) {
-               console.warn("Could not save initial profile to cloud (Permission Denied)");
-            }
-          }
-          setProfile(manualProfile);
-          setUnitNameInput(manualProfile.unitName);
-          setDefaultTireModelInput(manualProfile.defaultTireModel);
-          setDefaultTireSizeInput(manualProfile.defaultTireSize);
-        } else if (user) {
-          // Create profile for new Google user
-          const newProfile: UserProfile = {
-            uid: user.uid,
-            email: user.email || '',
-            name: user.displayName || 'Usuário',
-            role: 'admin',
-            unitName: 'Mina Itabira - Setor Norte',
-            defaultTireModel: '2400R35',
-            defaultTireSize: '35"'
-          };
-          if (isOnline) {
-            await setDoc(docRef, newProfile);
-          }
-          setProfile(newProfile);
-          setUnitNameInput(newProfile.unitName);
-          setDefaultTireModelInput(newProfile.defaultTireModel || '2400R35');
-          setDefaultTireSizeInput(newProfile.defaultTireSize || '35"');
-        }
-      } catch (error) {
-        // Handle "offline" error or Permission Denied gracefully
-        const isOfflineError = error instanceof Error && error.message.includes('offline');
-        const isPermissionError = error instanceof Error && error.message.includes('permission');
-        
-        if (isOfflineError || isPermissionError) {
-          console.warn(`Acesso local ${isPermissionError ? '(Permissão Pendente)' : '(Offline)'}`);
-          if (uid === 'manual-admin') {
-            setProfile({
-              uid: 'manual-admin',
-              name: 'Terminal MPC (Local)',
-              role: 'admin',
-              unitName: 'Unidade Central MPC',
-              defaultTireModel: '2400R35',
-              defaultTireSize: '35"'
-            });
-          }
-        } else {
-          console.error("Erro ao carregar perfil:", error);
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadData();
-  }, [user, isManualAuth, authChecked]);
-
-  useEffect(() => {
-    if ((!user && !isManualAuth) || !profile) return;
-
-    if (isOnline && pendingInspections.length > 0) {
-      syncPendingData();
-    }
-  }, [isOnline, user, isManualAuth, profile]);
 
   // Real-time Data Sync
   useEffect(() => {
-    // We need an authenticated system user (Google or Anonymous) OR specifically in Manual Mode with sync fallback
-    // But Firestore operations STRICTLY require auth.currentUser per rules.
-    if (!authChecked || (!auth.currentUser && !isManualAuth)) return;
+    // We need an authenticated system user (Google or Anonymous) 
+    // to satisfy Security Rules (request.auth != null)
+    if (!authChecked || !auth.currentUser) return;
+
+    setSyncError(null);
 
     const unsubTires = onSnapshot(collection(db, 'tires'), (snap) => {
       setTires(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Tire)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'tires'));
+    }, (err) => {
+      console.error("Tires sync error:", err);
+      setSyncError("Problema ao sincronizar pneus. Verifique sua permissão.");
+    });
 
     const unsubEq = onSnapshot(collection(db, 'equipment'), (snap) => {
       setEquipment(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Equipment)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'equipment'));
+    }, (err) => {
+      console.error("Equipment sync error:", err);
+    });
 
     const unsubInsp = onSnapshot(collection(db, 'inspections'), (snap) => {
       setInspections(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Inspection)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'inspections'));
+    }, (err) => {
+      console.error("Inspections sync error:", err);
+    });
 
     const unsubWork = onSnapshot(collection(db, 'workOrders'), (snap) => {
       setWorkOrders(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as WorkOrder)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'workOrders'));
+    }, (err) => {
+      console.error("Work orders sync error:", err);
+    });
 
     return () => {
       unsubTires();
@@ -933,7 +864,7 @@ export default function App() {
       unsubInsp();
       unsubWork();
     };
-  }, [user, isManualAuth, authChecked]);
+  }, [user, authChecked]);
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-bg-deep">
@@ -1127,6 +1058,11 @@ export default function App() {
                 <span className={`px-2 py-0.5 ${isOnline ? 'bg-green-500/20 text-green-500 border-green-500/30' : 'bg-red-500/20 text-red-500 border-red-500/30'} text-[10px] rounded border uppercase font-bold`}>
                   {isOnline ? 'CONEXÃO ESTÁVEL' : 'OFFLINE'}
                 </span>
+                {syncError && (
+                  <span className="px-2 py-0.5 bg-red-600/90 text-white text-[10px] rounded animate-pulse font-black">
+                    ERRO DE SINCRONIZAÇÃO
+                  </span>
+                )}
                 {pendingInspections.length > 0 && (
                   <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-500 text-[10px] rounded border border-yellow-500/30 uppercase font-bold flex items-center gap-1">
                     {pendingInspections.length} PENDENTES {isSyncing && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
