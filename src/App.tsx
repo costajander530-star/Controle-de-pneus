@@ -803,12 +803,12 @@ export default function App() {
     if (!authChecked) return;
 
     const loadData = async () => {
-      // Determine UID: prefer real user, then manual-admin, then fallback to null
+      // Determine UID: prefer manual-admin if isManualAuth, otherwise real user UID
       let uid: string | null = null;
-      if (user) {
-        uid = user.uid;
-      } else if (isManualAuth) {
+      if (isManualAuth) {
         uid = 'manual-admin';
+      } else if (user) {
+        uid = user.uid;
       }
 
       if (!uid) {
@@ -907,7 +907,9 @@ export default function App() {
 
   // Real-time Data Sync
   useEffect(() => {
-    if (!authChecked || (!user && !isManualAuth)) return;
+    // We need an authenticated system user (Google or Anonymous) OR specifically in Manual Mode with sync fallback
+    // But Firestore operations STRICTLY require auth.currentUser per rules.
+    if (!authChecked || (!auth.currentUser && !isManualAuth)) return;
 
     const unsubTires = onSnapshot(collection(db, 'tires'), (snap) => {
       setTires(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Tire)));
@@ -995,7 +997,14 @@ export default function App() {
               try {
                 setIsLoggingIn(true);
                 // Perform anonymous login to have a valid Firebase context for Sync
-                await signInAnonymously(auth);
+                try {
+                  await signInAnonymously(auth);
+                } catch (authError: any) {
+                  console.warn("Anonymous auth failed, attempting fallback (Sync may be limited):", authError);
+                  if (authError?.code === 'auth/operation-not-allowed') {
+                     throw new Error("O 'Login Anônimo' não está habilitado no seu Console Firebase. Para corrigir isso e permitir sincronização entre dispositivos, habilite o provider 'Anônimo' na aba Autenticação do seu projeto.");
+                  }
+                }
                 localStorage.setItem('isManualAuth', 'true');
                 setIsManualAuth(true);
               } catch (error) {
