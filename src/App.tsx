@@ -36,6 +36,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, signInWithGoogle, logout } from './services/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, onSnapshot, query, where, orderBy, deleteDoc, updateDoc, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
+import { signInAnonymously } from 'firebase/auth';
 import { UserProfile, Tire, Equipment, Inspection, WorkOrder, TireStatus, EquipmentStatus } from './types';
 import { cn } from './lib/utils';
 import { seedInitialData } from './services/seed';
@@ -377,6 +378,7 @@ export default function App() {
   });
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isEditTireModalOpen, setIsEditTireModalOpen] = useState(false);
   const [selectedTireToEdit, setSelectedTireToEdit] = useState<Tire | null>(null);
   const [isRegisterTireModalOpen, setIsRegisterTireModalOpen] = useState(false);
@@ -765,12 +767,9 @@ export default function App() {
   // Automatic Sync System
   useEffect(() => {
     if (isOnline && pendingInspections.length > 0 && !isSyncing) {
-      const timer = setTimeout(() => {
-        syncPendingData();
-      }, 5000); // Wait 5s after coming online or adding new pending data
-      return () => clearTimeout(timer);
+      syncPendingData();
     }
-  }, [isOnline, pendingInspections, isSyncing]);
+  }, [isOnline, pendingInspections.length, isSyncing]);
 
   const syncPendingData = async () => {
     if (!isOnline || pendingInspections.length === 0 || isSyncing) return;
@@ -882,6 +881,9 @@ export default function App() {
               defaultTireModel: '2400R35',
               defaultTireSize: '35"'
             };
+            if (isOnline) {
+               await setDoc(docRef, manualProfile);
+            }
             setProfile(manualProfile);
             setUnitNameInput(manualProfile.unitName);
             setDefaultTireModelInput(manualProfile.defaultTireModel || '2400R35');
@@ -927,6 +929,14 @@ export default function App() {
 
     loadData();
   }, [user, isManualAuth, authChecked]);
+
+  useEffect(() => {
+    if ((!user && !isManualAuth) || !profile) return;
+
+    if (isOnline && pendingInspections.length > 0) {
+      syncPendingData();
+    }
+  }, [isOnline, user, isManualAuth, profile]);
 
   // Real-time Data Sync
   useEffect(() => {
@@ -1013,17 +1023,35 @@ export default function App() {
         </div>
 
         <button 
-          onClick={() => {
+          onClick={async () => {
             if (loginCreds.username === 'MPCpneus' && loginCreds.password === '@Mpc2026') {
-              localStorage.setItem('isManualAuth', 'true');
-              setIsManualAuth(true);
+              try {
+                setIsLoggingIn(true);
+                // Perform anonymous login to have a valid Firebase context for Sync
+                await signInAnonymously(auth);
+                localStorage.setItem('isManualAuth', 'true');
+                setIsManualAuth(true);
+              } catch (error) {
+                console.error("Erro ao autenticar terminal:", error);
+                alert("Falha técnica no acesso. Verifique sua conexão.");
+              } finally {
+                setIsLoggingIn(false);
+              }
             } else {
               alert("Credenciais inválidas!");
             }
           }}
-          className="w-full bg-brand-primary text-black font-black py-4 rounded hover:brightness-110 transition-all flex items-center justify-center gap-4 shadow-[0_0_20px_rgba(226,232,240,0.15)] active:scale-95 uppercase tracking-widest text-xs"
+          disabled={isLoggingIn}
+          className="w-full bg-brand-primary text-black font-black py-4 rounded hover:brightness-110 disabled:opacity-50 transition-all flex items-center justify-center gap-4 shadow-[0_0_20px_rgba(226,232,240,0.15)] active:scale-95 uppercase tracking-widest text-xs"
         >
-          Acessar Terminal
+          {isLoggingIn ? (
+            <>
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              Sincronizando...
+            </>
+          ) : (
+            'Acessar Terminal'
+          )}
         </button>
 
         <div className="mt-8">
