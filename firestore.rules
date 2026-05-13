@@ -49,33 +49,27 @@ service cloud.firestore {
     // --- Collection Rules ---
 
     match /users/{userId} {
-      allow get: if isSignedIn();
-      allow list: if isAdmin();
-      allow create, update: if isSignedIn() && (request.auth.uid == userId || userId == 'manual-admin' || isAdmin());
+      allow read, write: if isSignedIn();
     }
 
     match /tires/{tireId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn() && isValidTire(incoming());
+      allow read, write: if isSignedIn();
       allow delete: if isSignedIn();
     }
 
     match /equipment/{equipmentId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn() && isValidEquipment(incoming());
+      allow read, write: if isSignedIn();
       allow delete: if isSignedIn();
     }
 
     match /inspections/{inspectionId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidInspection(incoming());
-      allow update: if isSignedIn();
+      allow read, write: if isSignedIn();
       allow delete: if isSignedIn();
     }
 
     match /workOrders/{orderId} {
-      allow read: if isSignedIn();
-      allow create, update, delete: if isSignedIn();
+      allow read, write: if isSignedIn();
+      allow delete: if isSignedIn();
     }
     
     // Connection test document

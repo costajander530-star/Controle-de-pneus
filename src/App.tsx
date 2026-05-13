@@ -740,7 +740,10 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthChecked(true);
-      if (u) {
+      
+      // If we have a user, check if it's a "real" user (Google login) or anonymous
+      if (u && !u.isAnonymous) {
+        // Only reset manual auth if it's a "real" Google Login
         setIsManualAuth(false);
         localStorage.removeItem('isManualAuth');
       }
@@ -940,7 +943,7 @@ export default function App() {
 
   // Real-time Data Sync
   useEffect(() => {
-    if ((!user && !isManualAuth) || !profile) return;
+    if (!authChecked || (!user && !isManualAuth)) return;
 
     const unsubTires = onSnapshot(collection(db, 'tires'), (snap) => {
       setTires(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Tire)));
@@ -964,7 +967,7 @@ export default function App() {
       unsubInsp();
       unsubWork();
     };
-  }, [user, isManualAuth, profile]);
+  }, [user, isManualAuth, authChecked]);
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-bg-deep">
