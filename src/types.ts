@@ -7,6 +7,8 @@ export interface UserProfile {
   role: UserRole;
   site?: string;
   unitName?: string;
+  defaultTireModel?: string;
+  defaultTireSize?: string;
 }
 
 export type TireStatus = 'inventory' | 'in_use' | 'retreading' | 'scrapped' | 'to_be_retreaded';

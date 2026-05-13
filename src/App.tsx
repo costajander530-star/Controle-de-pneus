@@ -29,12 +29,13 @@ import {
   Repeat,
   Hammer,
   Save,
-  Bell
+  Bell,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, signInWithGoogle, logout } from './services/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, getDoc, setDoc, collection, onSnapshot, query, where, orderBy, deleteDoc, updateDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, onSnapshot, query, where, orderBy, deleteDoc, updateDoc, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
 import { UserProfile, Tire, Equipment, Inspection, WorkOrder, TireStatus, EquipmentStatus } from './types';
 import { cn } from './lib/utils';
 import { seedInitialData } from './services/seed';
@@ -358,6 +359,11 @@ export default function App() {
   const [isManualAuth, setIsManualAuth] = useState(() => {
     return localStorage.getItem('isManualAuth') === 'true';
   });
+  const [authChecked, setAuthChecked] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [unitNameInput, setUnitNameInput] = useState('');
+  const [defaultTireModelInput, setDefaultTireModelInput] = useState('');
+  const [defaultTireSizeInput, setDefaultTireSizeInput] = useState('');
   const [loginCreds, setLoginCreds] = useState({ username: '', password: '' });
   const [view, setView] = useState<'dashboard' | 'inventory' | 'equipment' | 'inspections' | 'reports' | 'settings' | 'fleet-status' | 'alerts' | 'mapping'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -365,10 +371,14 @@ export default function App() {
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [inspections, setInspections] = useState<Inspection[]>([]);
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
+  const [pendingInspections, setPendingInspections] = useState<Inspection[]>(() => {
+    const saved = localStorage.getItem('pendingInspections');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [isEditTireModalOpen, setIsEditTireModalOpen] = useState(false);
   const [selectedTireToEdit, setSelectedTireToEdit] = useState<Tire | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [unitNameInput, setUnitNameInput] = useState('');
   const [isRegisterTireModalOpen, setIsRegisterTireModalOpen] = useState(false);
   const [isRegisterEquipmentModalOpen, setIsRegisterEquipmentModalOpen] = useState(false);
   const [activeEquipmentId, setActiveEquipmentId] = useState<string | null>(null);
@@ -414,33 +424,32 @@ export default function App() {
   const handleSaveInspection = async () => {
     if (!selectedTireIdForInspection || !activeEquipmentId) return;
     const inspectionId = crypto.randomUUID();
-    const path = `inspections/${inspectionId}`;
-    try {
-      const activeEq = equipment.find(e => e.id === activeEquipmentId);
-      const inspectionData: Inspection = {
-        id: inspectionId,
-        tireId: selectedTireIdForInspection,
-        equipmentId: activeEquipmentId,
-        inspectorId: profile?.uid || 'anonymous',
-        date: serverTimestamp(),
-        treadDepthPoints: [inspectionValues.twi],
-        temperature: 0,
-        pressure: inspectionValues.psiAfter,
-        equipmentHourMeter: activeEq?.hourMeter || 0,
-        condition: 'Normal'
-      };
-      
-      await setDoc(doc(db, 'inspections', inspectionId), inspectionData);
+    
+    // 1. Prepare data (Date will be updated to serverTimestamp during sync)
+    const activeEq = equipment.find(e => e.id === activeEquipmentId);
+    const inspectionData: Inspection = {
+      id: inspectionId,
+      tireId: selectedTireIdForInspection,
+      equipmentId: activeEquipmentId,
+      inspectorId: profile?.uid || 'anonymous',
+      date: new Date() as any, // Temporary local date
+      treadDepthPoints: [inspectionValues.twi],
+      temperature: 0,
+      pressure: inspectionValues.psiAfter,
+      equipmentHourMeter: activeEq?.hourMeter || 0,
+      condition: 'Normal'
+    };
 
-      await updateDoc(doc(db, 'tires', selectedTireIdForInspection), {
-        currentTreadDepth: inspectionValues.twi,
-        pressure: inspectionValues.psiAfter,
-        updatedAt: serverTimestamp()
-      });
-      alert("Configuração salva com sucesso! Inspeção registrada no histórico.");
-      setSelectedTireIdForInspection(null);
-    } catch (e) {
-      handleFirestoreError(e, OperationType.WRITE, path);
+    // 2. Add to Pending list immediately for UI feedback and persistence
+    setPendingInspections(prev => [...prev, inspectionData]);
+    setSelectedTireIdForInspection(null);
+
+    // 3. Try to sync immediately if online
+    if (isOnline) {
+      // Small timeout to let the state update and UI respond
+      setTimeout(() => syncPendingData(), 500);
+    } else {
+      alert("Você está offline. A inspeção foi salva localmente e será sincronizada assim que a conexão for restabelecida.");
     }
   };
 
@@ -543,8 +552,8 @@ export default function App() {
           dot: t.dot || `${newBatch.batchName}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`,
           batchName: newBatch.batchName,
           brand: t.brand || newBatch.brand,
-          model: 'Industrial Off-Road',
-          size: '29.5R25',
+          model: profile?.defaultTireModel || '2400R35',
+          size: profile?.defaultTireSize || '35"',
           type: newBatch.type,
           acquisitionCost: 15000,
           initialTreadDepth: t.treadDepth,
@@ -600,8 +609,8 @@ export default function App() {
           dot: t.dot,
           batchName: t.batchName || existingTire?.batchName || 'Lote Indefinido',
           brand: t.brand || (existingTire?.brand ?? 'Genérica'),
-          model: existingTire?.model ?? 'Off-Road',
-          size: existingTire?.size ?? '29.5R25',
+          model: existingTire?.model ?? profile?.defaultTireModel ?? '2400R35',
+          size: existingTire?.size ?? profile?.defaultTireSize ?? '35"',
           type: t.type,
           acquisitionCost: existingTire?.acquisitionCost ?? 15000,
           initialTreadDepth: existingTire?.initialTreadDepth ?? t.treadDepth,
@@ -686,6 +695,18 @@ export default function App() {
     }
   };
 
+  const handleDeleteInspection = async (id: string) => {
+    if (!window.confirm("Deseja realmente remover este registro de inspeção?")) return;
+    try {
+      await deleteDoc(doc(db, 'inspections', id));
+      alert("Inspeção removida com sucesso.");
+    } catch (error) {
+      console.error("Erro ao remover inspeção:", error);
+      alert("Erro ao remover inspeção.");
+      handleFirestoreError(error, OperationType.DELETE, `inspections/${id}`);
+    }
+  };
+
   const handleLogout = async () => {
     setIsManualAuth(false);
     localStorage.removeItem('isManualAuth');
@@ -693,89 +714,247 @@ export default function App() {
     setProfile(null);
   };
 
-  const updateUnitName = async () => {
+  const updateSettings = async () => {
     if ((!user && !isManualAuth) || !profile) return;
     try {
-      const updatedProfile = { ...profile, unitName: unitNameInput };
+      const updatedProfile: UserProfile = { 
+        ...profile, 
+        unitName: unitNameInput,
+        defaultTireModel: defaultTireModelInput,
+        defaultTireSize: defaultTireSizeInput
+      };
       const userId = user?.uid || 'manual-admin';
       await setDoc(doc(db, 'users', userId), updatedProfile);
       setProfile(updatedProfile);
-      alert("Unidade atualizada com sucesso!");
+      alert("Configurações atualizadas com sucesso!");
     } catch (error) {
       console.error(error);
-      alert("Erro ao atualizar unidade.");
+      alert("Erro ao atualizar configurações.");
     }
   };
 
+  // Authentication Listener
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
+    const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
+      setAuthChecked(true);
       if (u) {
-        setLoading(true);
-        const docRef = doc(db, 'users', u.uid);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const p = docSnap.data() as UserProfile;
-          setProfile(p);
-          setUnitNameInput(p.unitName || 'Mina Itabira - Setor Norte');
-        } else {
-          const newProfile: UserProfile = {
-            uid: u.uid,
-            email: u.email || '',
-            name: u.displayName || 'User',
-            role: 'admin',
-            unitName: 'Mina Itabira - Setor Norte'
-          };
-          await setDoc(docRef, newProfile);
-          setProfile(newProfile);
-          setUnitNameInput(newProfile.unitName || 'Mina Itabira - Setor Norte');
-        }
         setIsManualAuth(false);
         localStorage.removeItem('isManualAuth');
-      } else if (isManualAuth) {
-        // Handle manual auth profile fetch
-        setLoading(true);
-        const docRef = doc(db, 'users', 'manual-admin');
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const p = docSnap.data() as UserProfile;
-          setProfile(p);
-          setUnitNameInput(p.unitName || 'Unidade Central MPC');
-        } else {
-          const manualProfile: UserProfile = {
-            uid: 'manual-admin',
-            name: 'MPC Pneus Admin',
-            email: 'admin@mpcpneus.com.br',
-            role: 'admin',
-            unitName: 'Unidade Central MPC'
-          };
-          setProfile(manualProfile);
-          setUnitNameInput(manualProfile.unitName);
-        }
-      } else {
-        setProfile(null);
       }
-      setLoading(false);
     });
     return unsub;
   }, []);
 
+  // Profile and Initial Data Fetching
   useEffect(() => {
-    if (!user && !isManualAuth) return;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('pendingInspections', JSON.stringify(pendingInspections));
+  }, [pendingInspections]);
+
+  // Automatic Sync System
+  useEffect(() => {
+    if (isOnline && pendingInspections.length > 0 && !isSyncing) {
+      const timer = setTimeout(() => {
+        syncPendingData();
+      }, 5000); // Wait 5s after coming online or adding new pending data
+      return () => clearTimeout(timer);
+    }
+  }, [isOnline, pendingInspections, isSyncing]);
+
+  const syncPendingData = async () => {
+    if (!isOnline || pendingInspections.length === 0 || isSyncing) return;
+    setIsSyncing(true);
+    console.log(`Syncing ${pendingInspections.length} pending inspections...`);
+    
+    const remaining = [...pendingInspections];
+    const successfullySynced: string[] = [];
+
+    for (const inspection of pendingInspections) {
+      try {
+        // Conflict Resolution Strategy: 
+        // 1. Check if inspection already exists (by ID)
+        const docRef = doc(db, 'inspections', inspection.id);
+        const docSnap = await getDoc(docRef);
+        
+        if (!docSnap.exists()) {
+          // 2. Perform Atomic Write for Inspection + Tire Update
+          const batch = writeBatch(db);
+          
+          // Add inspection
+          batch.set(docRef, {
+            ...inspection,
+            date: serverTimestamp(), // Use server time for the cloud record
+            syncDate: serverTimestamp()
+          });
+
+          // Update tire (Last Write Wins for most attributes, but we check if tire was decommissioned)
+          const tireRef = doc(db, 'tires', inspection.tireId);
+          const tireSnap = await getDoc(tireRef);
+          
+          if (tireSnap.exists()) {
+            const tireData = tireSnap.data();
+            // If the tire was scrapped while we were offline, we might want to skip the update
+            if (tireData.status !== 'scrapped') {
+              batch.update(tireRef, {
+                currentTreadDepth: inspection.treadDepthPoints[0],
+                pressure: inspection.pressure,
+                updatedAt: serverTimestamp()
+              });
+            }
+          }
+          
+          await batch.commit();
+        }
+        
+        successfullySynced.push(inspection.id);
+      } catch (error) {
+        console.error(`Failed to sync inspection ${inspection.id}:`, error);
+        // If it's a permission error, we might want to remove it to avoid infinite loops
+        if (error instanceof Error && error.message.includes('permission')) {
+          successfullySynced.push(inspection.id); 
+        }
+      }
+    }
+
+    setPendingInspections(prev => prev.filter(p => !successfullySynced.includes(p.id)));
+    setIsSyncing(false);
+  };
+
+  // Profile and Initial Data Fetching
+  useEffect(() => {
+    if (!authChecked) return;
+
+    const loadData = async () => {
+      setLoading(true);
+      try {
+        if (user) {
+          const docRef = doc(db, 'users', user.uid);
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) {
+            const p = docSnap.data() as UserProfile;
+            setProfile(p);
+            setUnitNameInput(p.unitName || 'Mina Itabira - Setor Norte');
+            setDefaultTireModelInput(p.defaultTireModel || '2400R35');
+            setDefaultTireSizeInput(p.defaultTireSize || '35"');
+          } else {
+            const newProfile: UserProfile = {
+              uid: user.uid,
+              email: user.email || '',
+              name: user.displayName || 'User',
+              role: 'admin',
+              unitName: 'Mina Itabira - Setor Norte',
+              defaultTireModel: '2400R35',
+              defaultTireSize: '35"'
+            };
+            await setDoc(docRef, newProfile);
+            setProfile(newProfile);
+            setUnitNameInput(newProfile.unitName);
+            setDefaultTireModelInput(newProfile.defaultTireModel || '2400R35');
+            setDefaultTireSizeInput(newProfile.defaultTireSize || '35"');
+          }
+        } else if (isManualAuth) {
+          const docRef = doc(db, 'users', 'manual-admin');
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) {
+            const p = docSnap.data() as UserProfile;
+            setProfile(p);
+            setUnitNameInput(p.unitName || 'Unidade Central MPC');
+            setDefaultTireModelInput(p.defaultTireModel || '2400R35');
+            setDefaultTireSizeInput(p.defaultTireSize || '35"');
+          } else {
+            const manualProfile: UserProfile = {
+              uid: 'manual-admin',
+              name: 'MPC Pneus Admin',
+              email: 'admin@mpcpneus.com.br',
+              role: 'admin',
+              unitName: 'Unidade Central MPC',
+              defaultTireModel: '2400R35',
+              defaultTireSize: '35"'
+            };
+            setProfile(manualProfile);
+            setUnitNameInput(manualProfile.unitName);
+            setDefaultTireModelInput(manualProfile.defaultTireModel || '2400R35');
+            setDefaultTireSizeInput(manualProfile.defaultTireSize || '35"');
+          }
+        } else {
+          setProfile(null);
+        }
+      } catch (error) {
+        // Handle "offline" error gracefully without showing a console.error
+        const isOfflineError = error instanceof Error && error.message.includes('offline');
+        
+        if (isOfflineError) {
+          console.warn("Cliente offline ao carregar perfil, usando dados locais/temporários.");
+          if (user) {
+            setProfile({
+              uid: user.uid,
+              email: user.email || '',
+              name: user.displayName || 'Usuário (Offline)',
+              role: 'admin',
+              unitName: 'Carregando (Offline)...',
+              defaultTireModel: '2400R35',
+              defaultTireSize: '35"'
+            });
+          } else if (isManualAuth) {
+            setProfile({
+              uid: 'manual-admin',
+              name: 'MPC Pneus Admin (Offline)',
+              email: 'admin@mpcpneus.com.br',
+              role: 'admin',
+              unitName: 'Unidade Central MPC',
+              defaultTireModel: '2400R35',
+              defaultTireSize: '35"'
+            });
+          }
+        } else {
+          console.error("Erro ao carregar perfil:", error);
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, [user, isManualAuth, authChecked]);
+
+  // Real-time Data Sync
+  useEffect(() => {
+    if ((!user && !isManualAuth) || !profile) return;
+
     const unsubTires = onSnapshot(collection(db, 'tires'), (snap) => {
       setTires(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Tire)));
-    });
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'tires'));
+
     const unsubEq = onSnapshot(collection(db, 'equipment'), (snap) => {
       setEquipment(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Equipment)));
-    });
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'equipment'));
+
     const unsubInsp = onSnapshot(collection(db, 'inspections'), (snap) => {
       setInspections(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Inspection)));
-    });
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'inspections'));
+
     const unsubWork = onSnapshot(collection(db, 'workOrders'), (snap) => {
       setWorkOrders(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as WorkOrder)));
-    });
-    return () => { unsubTires(); unsubEq(); unsubInsp(); unsubWork(); };
-  }, [user, isManualAuth]);
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'workOrders'));
+
+    return () => {
+      unsubTires();
+      unsubEq();
+      unsubInsp();
+      unsubWork();
+    };
+  }, [user, isManualAuth, profile]);
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-bg-deep">
@@ -836,13 +1015,8 @@ export default function App() {
         <button 
           onClick={() => {
             if (loginCreds.username === 'MPCpneus' && loginCreds.password === '@Mpc2026') {
-              setIsManualAuth(true);
               localStorage.setItem('isManualAuth', 'true');
-              // Trigger a re-run of the auth effect to load manual profile
-              setLoading(true);
-              setTimeout(() => {
-                setLoading(false);
-              }, 100);
+              setIsManualAuth(true);
             } else {
               alert("Credenciais inválidas!");
             }
@@ -916,15 +1090,22 @@ export default function App() {
         </nav>
 
         <div className="mt-auto space-y-4">
-          <div className="w-10 h-10 rounded-full bg-brand-secondary/20 border border-brand-secondary/30 flex items-center justify-center animate-pulse">
-            <div className="w-2 h-2 bg-brand-secondary rounded-full" />
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-full ${isOnline ? 'bg-green-500/20 border-green-500/30' : 'bg-red-500/20 border-red-500/30'} border flex items-center justify-center ${isOnline ? 'animate-pulse' : ''}`}>
+              <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] font-black text-gray-500 tracking-widest">{isOnline ? 'CONNECTED' : 'DISCONNECTED'}</span>
+              {pendingInspections.length > 0 && <span className="text-[8px] font-bold text-yellow-500 truncate">{pendingInspections.length} SYNC PENDING</span>}
+            </div>
           </div>
           <button 
             onClick={handleLogout}
-            className="p-3 text-red-400 hover:bg-red-900/20 rounded transition-all"
+            className="p-3 text-red-400 hover:bg-red-900/20 rounded transition-all w-full flex items-center gap-3"
             title="LOGOUT"
           >
             <LogOut className="w-5 h-5" />
+            <span className="text-[10px] font-black tracking-[0.2em]">SESSÃO / SAIR</span>
           </button>
         </div>
       </aside>
@@ -937,7 +1118,16 @@ export default function App() {
             <h1 className="text-[10px] font-bold tracking-[0.3em] text-gray-500 uppercase">Motor de Inteligência de Frota v4.2</h1>
             <div className="flex items-center gap-3">
               <span className="text-xl font-bold tracking-tight">Unidade: {profile?.unitName || 'Mina Itabira - Setor Norte'}</span>
-              <span className="px-2 py-0.5 bg-brand-secondary/20 text-brand-secondary text-[10px] rounded border border-brand-secondary/30 uppercase font-bold">ONLINE / SINCRONIZADO</span>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 ${isOnline ? 'bg-green-500/20 text-green-500 border-green-500/30' : 'bg-red-500/20 text-red-500 border-red-500/30'} text-[10px] rounded border uppercase font-bold`}>
+                  {isOnline ? 'CONEXÃO ESTÁVEL' : 'OFFLINE'}
+                </span>
+                {pendingInspections.length > 0 && (
+                  <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-500 text-[10px] rounded border border-yellow-500/30 uppercase font-bold flex items-center gap-1">
+                    {pendingInspections.length} PENDENTES {isSyncing && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           
@@ -1305,6 +1495,15 @@ export default function App() {
                                           <p className="text-xs font-black text-brand-primary font-mono">{insp.treadDepthPoints[0]}mm</p>
                                           <p className="text-[8px] font-bold text-gray-600 uppercase mt-1">H: {insp.equipmentHourMeter}h</p>
                                        </div>
+                                       <button 
+                                         onClick={(e) => {
+                                           e.stopPropagation();
+                                           handleDeleteInspection(insp.id);
+                                         }}
+                                         className="p-1.5 text-gray-500 hover:text-red-500 rounded transition-all opacity-0 group-hover:opacity-100"
+                                       >
+                                         <Trash2 className="w-3 h-3" />
+                                       </button>
                                     </div>
                                   );
                                })
@@ -1585,17 +1784,29 @@ export default function App() {
                             <div>
                               <div className="flex items-center gap-3 mb-1">
                                 <h3 className="text-5xl font-black font-mono tracking-tighter text-white uppercase">{eq.tag}</h3>
-                                <span className={cn(
-                                  "text-[8px] font-black px-2 py-0.5 rounded border uppercase tracking-widest",
-                                  eq.status === 'in_operation' ? "bg-brand-primary/10 text-brand-primary border-brand-primary/20" :
-                                  eq.status === 'in_maintenance' ? "bg-red-500/10 text-red-500 border-red-500/20" :
-                                  eq.status === 'idle' ? "bg-gray-500/10 text-gray-400 border-gray-500/20" :
-                                  "bg-green-500/10 text-green-500 border-green-500/20"
-                                )}>
-                                  {eq.status === 'in_operation' ? 'Em Operação' : 
-                                   eq.status === 'in_maintenance' ? 'Em Manutenção' :
-                                   eq.status === 'idle' ? 'Ocioso' : 'Ativo'}
-                                </span>
+                                <div className="flex items-center gap-2">
+                                  <span className={cn(
+                                    "text-[8px] font-black px-2 py-0.5 rounded border uppercase tracking-widest",
+                                    eq.status === 'in_operation' ? "bg-brand-primary/10 text-brand-primary border-brand-primary/20" :
+                                    eq.status === 'in_maintenance' ? "bg-red-500/10 text-red-500 border-red-500/20" :
+                                    eq.status === 'idle' ? "bg-gray-500/10 text-gray-400 border-gray-500/20" :
+                                    "bg-green-500/10 text-green-500 border-green-500/20"
+                                  )}>
+                                    {eq.status === 'in_operation' ? 'Em Operação' : 
+                                     eq.status === 'in_maintenance' ? 'Em Manutenção' :
+                                     eq.status === 'idle' ? 'Ocioso' : 'Ativo'}
+                                  </span>
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDiscardEquipment(eq.id);
+                                    }}
+                                    className="p-1 text-gray-500 hover:text-red-500 hover:bg-red-500/10 rounded transition-all ml-2"
+                                    title="Descartar Equipamento"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
                               </div>
                               <p className="text-sm font-bold text-gray-500 uppercase tracking-widest flex items-center gap-3">
                                 {eq.model} <span className="w-1.5 h-1.5 rounded-full bg-gray-700" /> {eq.unitName || 'Unidade Principal'}
@@ -1729,31 +1940,42 @@ export default function App() {
                       const eqTires = tires.filter(t => t.equipmentId === eq.id);
                       const isCritical = eqTires.some(t => t.currentTreadDepth < 10);
                       return (
-                        <button 
-                          key={eq.id}
-                          onClick={() => setActiveEquipmentId(eq.id)}
-                          className={cn(
-                            "bg-bg-section border p-6 rounded-lg flex items-center gap-5 hover:bg-bg-card transition-all text-left group",
-                            isCritical ? "border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.1)]" : "border-border-subtle hover:border-brand-primary"
-                          )}
-                        >
-                          <div className={cn(
-                            "bg-bg-deep p-4 rounded border group-hover:border-brand-primary/30",
-                            isCritical ? "border-red-500/30" : "border-border-subtle"
-                          )}>
-                            <Truck className={cn("w-8 h-8", isCritical ? "text-red-500" : "text-gray-600 group-hover:text-brand-primary")} />
-                          </div>
-                          <div className="flex-1">
-                            <p className={cn("font-mono text-xl font-bold tracking-tight", isCritical ? "text-red-500" : "text-brand-primary")}>{eq.tag}</p>
-                            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">{eq.model} • {eq.hourMeter}H</p>
-                          </div>
-                          {isCritical && (
-                            <div className="flex flex-col items-end">
-                              <AlertTriangle className="w-4 h-4 text-red-500 animate-pulse" />
-                              <span className="text-[8px] font-bold text-red-500 uppercase">TWI Baixo</span>
+                        <div key={eq.id} className="relative group">
+                          <button 
+                            onClick={() => setActiveEquipmentId(eq.id)}
+                            className={cn(
+                              "w-full bg-bg-section border p-6 rounded-lg flex items-center gap-5 hover:bg-bg-card transition-all text-left",
+                              isCritical ? "border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.1)]" : "border-border-subtle hover:border-brand-primary"
+                            )}
+                          >
+                            <div className={cn(
+                              "bg-bg-deep p-4 rounded border group-hover:border-brand-primary/30",
+                              isCritical ? "border-red-500/30" : "border-border-subtle"
+                            )}>
+                              <Truck className={cn("w-8 h-8", isCritical ? "text-red-500" : "text-gray-600 group-hover:text-brand-primary")} />
                             </div>
-                          )}
-                        </button>
+                            <div className="flex-1">
+                              <p className={cn("font-mono text-xl font-bold tracking-tight", isCritical ? "text-red-500" : "text-brand-primary")}>{eq.tag}</p>
+                              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">{eq.model} • {eq.hourMeter}H</p>
+                            </div>
+                            {isCritical && (
+                              <div className="flex flex-col items-end">
+                                <AlertTriangle className="w-4 h-4 text-red-500 animate-pulse" />
+                                <span className="text-[8px] font-bold text-red-500 uppercase">TWI Baixo</span>
+                              </div>
+                            )}
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDiscardEquipment(eq.id);
+                            }}
+                            className="absolute top-2 right-2 p-1.5 text-gray-700 hover:text-red-500 transition-all opacity-0 group-hover:opacity-100 bg-bg-deep/50 rounded-md backdrop-blur-sm"
+                            title="Remover Equipamento"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       );
                     })}
                     <button 
@@ -2357,13 +2579,35 @@ export default function App() {
                       value={unitNameInput}
                       onChange={(e) => setUnitNameInput(e.target.value)}
                       placeholder="Ex: Mina Itabira - Setor Norte" 
-                      className="w-full bg-bg-deep border border-border-subtle rounded px-6 py-4 font-mono text-xl text-white focus:border-brand-primary transition-all outline-none" 
+                      className="w-full bg-bg-deep border border-border-subtle rounded px-6 py-3 font-mono text-lg text-white focus:border-brand-primary transition-all outline-none" 
                     />
-                    <p className="mt-4 text-[10px] text-gray-600 uppercase font-bold">Este nome será exibido no cabeçalho de todos os terminais da unidade.</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">Modelo Padrão de Pneu</label>
+                      <input 
+                        type="text" 
+                        value={defaultTireModelInput}
+                        onChange={(e) => setDefaultTireModelInput(e.target.value)}
+                        placeholder="Ex: 2400R35" 
+                        className="w-full bg-bg-deep border border-border-subtle rounded px-4 py-3 font-mono text-white focus:border-brand-primary transition-all outline-none" 
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">Medida Padrão</label>
+                      <input 
+                        type="text" 
+                        value={defaultTireSizeInput}
+                        onChange={(e) => setDefaultTireSizeInput(e.target.value)}
+                        placeholder={'Ex: 35"'} 
+                        className="w-full bg-bg-deep border border-border-subtle rounded px-4 py-3 font-mono text-white focus:border-brand-primary transition-all outline-none" 
+                      />
+                    </div>
                   </div>
 
                   <button 
-                    onClick={updateUnitName}
+                    onClick={updateSettings}
                     className="w-full bg-brand-secondary text-white font-black py-5 rounded hover:brightness-110 transition-all text-sm tracking-[0.15em] uppercase shadow-[0_0_20px_rgba(34,197,94,0.15)]"
                   >
                     Salvar Alterações
